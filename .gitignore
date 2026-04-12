@@ -1,3 +1,6 @@
 target/
 rootfs/
 Cargo.lock
+sandbox.db
+sandbox.db-*
+.DS_Store
