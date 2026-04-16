@@ -11,6 +11,13 @@ struct AppState {
     db_path: PathBuf,
 }
 
+#[derive(serde::Deserialize)]
+pub struct RunPayload {
+    pub script: String,
+    pub mem_limit_mb: Option<u64>,
+    pub cpu_limit_secs: Option<u64>,
+}
+
 #[derive(Serialize)]
 struct ApiHealth {
     status: &'static str,
@@ -81,10 +88,10 @@ async fn health(data: web::Data<AppState>) -> impl Responder {
 }
 
 #[post("/run")]
-async fn run_container_api(data: web::Data<AppState>) -> impl Responder {
+async fn run_container_api(data: web::Data<AppState>, payload: web::Json<RunPayload>) -> impl Responder {
     let started_at = Instant::now();
     let created_at = created_at_now();
-    let output = crate::run_container();
+    let output = crate::run_container(&payload.script, payload.cpu_limit_secs, payload.mem_limit_mb);
     let duration_ms = started_at.elapsed().as_millis() as i64;
     let status =
         if output.to_lowercase().contains("failed") || output.to_lowercase().contains("error") {

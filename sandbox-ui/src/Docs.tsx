@@ -1,5 +1,5 @@
 import { motion } from "framer-motion";
-import { ArrowLeft, BookOpen, Key, ShieldAlert } from "lucide-react";
+import { ArrowLeft, BookOpen, Key, ShieldAlert, Code2 } from "lucide-react";
 import { Link } from "react-router-dom";
 
 export default function Docs() {
@@ -15,7 +15,7 @@ export default function Docs() {
             Sandbox Documentation
           </h1>
           <p className="text-lg text-slate-500 dark:text-slate-400 mb-12">
-            Secure, ephemeral execution environments built for high-performance developer tools and rigorous security testing.
+            Secure, ephemeral execution environments built on <code className="text-blue-400">libc::fork()</code> + <code className="text-blue-400">setrlimit</code> process isolation, hosted on Hugging Face.
           </p>
 
           <div className="grid gap-12">
@@ -24,18 +24,47 @@ export default function Docs() {
                 <BookOpen className="text-blue-500" /> Getting Started
               </h2>
               <div className="p-6 rounded-2xl dark:bg-[#0a0a0a] bg-white border dark:border-white/5 border-slate-200 shadow-sm leading-relaxed dark:text-slate-300 text-slate-700">
-                The Sandbox environment creates a lightweight micro-VM directly attached to your API request. 
-                Using minimal <code>chroot</code> and custom namespace isolation locally, or isolated serverless compute instances on Vercel, it ensures your code executes without affecting the main cluster.
+                The Sandbox engine uses <code>libc::fork()</code> to create an isolated child process for every execution request.
+                Resource limits (<code>RLIMIT_CPU</code> and <code>RLIMIT_AS</code>) are enforced via <code>setrlimit</code> before the script is executed with <code>/bin/sh -c</code>.
+                The parent process captures stdout/stderr via a pipe and records the result in a local SQLite database.
               </div>
             </section>
 
             <section>
               <h2 className="text-2xl font-semibold dark:text-white text-slate-900 mb-4 flex items-center gap-3">
-                <Key className="text-blue-500" /> Web Integration
+                <Code2 className="text-blue-500" /> API Reference
+              </h2>
+              <div className="p-6 rounded-2xl dark:bg-[#0a0a0a] bg-white border dark:border-white/5 border-slate-200 shadow-sm leading-relaxed dark:text-slate-300 text-slate-700 space-y-6">
+                <div>
+                  <h3 className="font-bold text-lg dark:text-white text-slate-900 mb-2">POST /run</h3>
+                  <p className="mb-2">Execute a script in an isolated sandbox process.</p>
+                  <pre className="bg-slate-100 dark:bg-[#111] p-4 rounded-xl text-sm font-mono overflow-x-auto border border-slate-200 dark:border-white/5">
+{`{
+  "script": "echo hello && date",
+  "cpu_limit_secs": 2,
+  "mem_limit_mb": 50
+}`}
+                  </pre>
+                </div>
+                <div>
+                  <h3 className="font-bold text-lg dark:text-white text-slate-900 mb-2">GET /runs</h3>
+                  <p>Returns the last 20 execution records from the SQLite database.</p>
+                </div>
+                <div>
+                  <h3 className="font-bold text-lg dark:text-white text-slate-900 mb-2">GET /</h3>
+                  <p>Health check — returns <code>"Sandbox API is running"</code>.</p>
+                </div>
+              </div>
+            </section>
+
+            <section>
+              <h2 className="text-2xl font-semibold dark:text-white text-slate-900 mb-4 flex items-center gap-3">
+                <Key className="text-blue-500" /> Concurrent Execution
               </h2>
               <div className="p-6 rounded-2xl dark:bg-[#0a0a0a] bg-white border dark:border-white/5 border-slate-200 shadow-sm leading-relaxed dark:text-slate-300 text-slate-700">
-                You can invoke a container build manually by passing a payload to the <code>/api/execute</code> endpoint.
-                Provide the constraints such as <code>runtime</code> (e.g., node, python) and <code>code</code>. The returned block will contain standardized output logs and the <code>duration_ms</code>.
+                The backend uses <code>tokio::task::spawn_blocking</code> to offload each <code>fork()</code> call to a dedicated thread pool.
+                This means multiple sandbox requests can execute <strong>concurrently</strong> — each in its own forked child process with independent resource limits.
+                The actix-web server runs 4 worker threads by default, allowing up to 4 simultaneous sandbox executions.
               </div>
             </section>
 
@@ -45,9 +74,10 @@ export default function Docs() {
               </h2>
               <div className="p-6 rounded-2xl dark:bg-[#0a0a0a] bg-white border dark:border-white/5 border-slate-200 shadow-sm leading-relaxed dark:text-slate-300 text-slate-700">
                 <ul className="list-disc pl-5 space-y-2">
-                  <li>Maximum execution timeout is rigorously enforced at 15 seconds.</li>
-                  <li>Inbound network ingress is strictly prohibited inside the user container.</li>
-                  <li>The container destroys itself, performing zero-trust cleanup upon exit or panic.</li>
+                  <li>CPU time is enforced via <code>RLIMIT_CPU</code> — child is killed by SIGXCPU on exceeding.</li>
+                  <li>Address space is capped via <code>RLIMIT_AS</code> — allocations beyond the limit will fail.</li>
+                  <li>Hugging Face free tier provides 2 vCPU + 16GB RAM — shared across all concurrent sandboxes.</li>
+                  <li>The child process is fully destroyed on exit — no state persists between runs.</li>
                 </ul>
               </div>
             </section>

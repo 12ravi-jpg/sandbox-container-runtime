@@ -1,13 +1,16 @@
-import { useState, useEffect } from "react";
-import { motion } from "framer-motion";
+import { useState, useEffect, useCallback } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import { Routes, Route, Link } from "react-router-dom";
 import { 
   Shield, Zap, Terminal as TerminalIcon, 
   Layers, Activity, ChevronRight, CheckCircle2,
-  Sun, Moon, ExternalLink 
+  Sun, Moon, ExternalLink, Plus, X, Loader2, Clock
 } from "lucide-react";
 
 import Docs from "./Docs";
+
+// ─── Point this at your Hugging Face Space URL ───
+const API_BASE = import.meta.env.VITE_API_URL || "https://ror-12-sandbox-backend.hf.space";
 
 const themes = {
   light: "light",
@@ -34,6 +37,33 @@ const pricingPlans = [
   { name: "Pro", price: "$49/mo", desc: "For production scaling.", features: ["100k runs/mo", "2GB RAM Limit", "Priority Support"], popular: true },
   { name: "Enterprise", price: "Custom", desc: "For platform teams.", features: ["Unlimited runs", "Custom RAM", "SLA / VPC Peering"] },
 ];
+
+// ─── Types ───
+
+interface SandboxInstance {
+  id: string;
+  script: string;
+  cpuLimit: number;
+  ramLimit: number;
+  status: "idle" | "running" | "completed" | "failed";
+  lines: string[];
+  durationMs?: number;
+  dbId?: number;
+}
+
+let nextId = 1;
+function makeId() { return `sb-${nextId++}-${Date.now()}`; }
+
+function defaultSandbox(): SandboxInstance {
+  return {
+    id: makeId(),
+    script: "echo 'Hello from Sandbox!'\nls -la /\ndate",
+    cpuLimit: 2,
+    ramLimit: 50,
+    status: "idle",
+    lines: ["$ waiting for input..."],
+  };
+}
 
 export default function App() {
   const [theme, setTheme] = useState(themes.dark);
@@ -117,7 +147,7 @@ function DashboardModal({ onClose }: { onClose: () => void }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch('/api/history')
+    fetch(`${API_BASE}/runs`)
       .then(res => res.json())
       .then(data => { setHistory(Array.isArray(data) ? data : []); setLoading(false); })
       .catch(e => { console.error(e); setLoading(false); });
@@ -131,13 +161,13 @@ function DashboardModal({ onClose }: { onClose: () => void }) {
           <button onClick={onClose} className="text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white text-lg font-bold px-3 py-1 bg-slate-100 dark:bg-white/5 rounded-lg">X</button>
         </div>
         
-        {loading ? <p className="text-slate-500 dark:text-slate-400">Loading prior runs from Vercel Edge...</p> : (
+        {loading ? <p className="text-slate-500 dark:text-slate-400">Loading execution history...</p> : (
           history.length === 0 ? <p className="text-slate-500 dark:text-slate-400">No executions found.</p> : (
             <div className="grid gap-3">
               {history.map(row => (
                 <div key={row.id} className="p-4 rounded-xl border border-slate-200 dark:border-white/5 bg-slate-50 dark:bg-[#111] flex justify-between items-center">
                   <div>
-                    <span className="text-xs text-slate-500 dark:text-slate-400 font-mono mb-1 block">ID: {row.id} • {new Date(row.created_at).toLocaleString()}</span>
+                    <span className="text-xs text-slate-500 dark:text-slate-400 font-mono mb-1 block">ID: {row.id} • {new Date(row.created_at * 1000).toLocaleString()}</span>
                     <span className={`text-sm font-semibold ${row.status === 'completed' ? 'text-emerald-500' : 'text-red-500'}`}>{row.status.toUpperCase()}</span>
                   </div>
                   <div className="text-sm text-slate-500 dark:text-slate-400">
@@ -154,36 +184,127 @@ function DashboardModal({ onClose }: { onClose: () => void }) {
 }
 
 function Home() {
-  const [isRunning, setIsRunning] = useState(false);
-  const [terminalLines, setTerminalLines] = useState<string[]>([
-    "$ sandbox connect",
-    "Connected to Vercel Edge pool"
-  ]);
+  const [sandboxes, setSandboxes] = useState<SandboxInstance[]>([defaultSandbox()]);
 
-  const runDemo = async () => {
-    if (isRunning) return;
-    setIsRunning(true);
-    setTerminalLines(["$ sandbox run --runtime node", "Sending payload to Serverless execution engine..."]);
-    
+  const addSandbox = useCallback(() => {
+    setSandboxes(prev => [...prev, defaultSandbox()]);
+  }, []);
+
+  const removeSandbox = useCallback((id: string) => {
+    setSandboxes(prev => prev.length <= 1 ? prev : prev.filter(s => s.id !== id));
+  }, []);
+
+  const updateSandbox = useCallback((id: string, patch: Partial<SandboxInstance>) => {
+    setSandboxes(prev => prev.map(s => s.id === id ? { ...s, ...patch } : s));
+  }, []);
+
+  const runSandbox = useCallback(async (id: string) => {
+    const sandbox = sandboxes.find(s => s.id === id);
+    if (!sandbox || sandbox.status === "running") return;
+
+    updateSandbox(id, {
+      status: "running",
+      lines: ["$ Sending payload to runtime engine...", "⏳ Waiting for sandbox response..."],
+    });
+
     try {
-      const resp = await fetch('/api/execute', { 
-        method: 'POST', 
+      const resp = await fetch(`${API_BASE}/run`, {
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ runtime: "node", code: "console.log('Hello from Vercel!')" })
+        body: JSON.stringify({
+          script: sandbox.script,
+          cpu_limit_secs: sandbox.cpuLimit,
+          mem_limit_mb: sandbox.ramLimit,
+        }),
       });
       const data = await resp.json();
-      
+
       if (resp.ok) {
-        setTerminalLines(data.logs.split('\\n'));
+        const outputLines = data.logs
+          .split('\n')
+          .filter((l: string) => l.length > 0);
+        updateSandbox(id, {
+          status: data.status === "completed" ? "completed" : "failed",
+          lines: [
+            `$ sandbox run --cpu ${sandbox.cpuLimit}s --mem ${sandbox.ramLimit}MB`,
+            ...outputLines,
+            ``,
+            `Exit: ${data.status.toUpperCase()} in ${data.duration_ms}ms (run #${data.id})`,
+          ],
+          durationMs: data.duration_ms,
+          dbId: data.id,
+        });
       } else {
-        setTerminalLines(["Error executing: " + (data.error || "Unknown Error")]);
+        updateSandbox(id, {
+          status: "failed",
+          lines: ["Error: " + (data.error || JSON.stringify(data))],
+        });
       }
-    } catch (err) {
-      setTerminalLines(prev => [...prev, "Network request failed. Is the API server running?"]);
+    } catch (err: any) {
+      updateSandbox(id, {
+        status: "failed",
+        lines: ["❌ Network request failed. Is the backend running?", err?.message || ""],
+      });
     }
-    
-    setIsRunning(false);
-  };
+  }, [sandboxes, updateSandbox]);
+
+  // We need a stable reference for runSandbox that sees latest sandboxes
+  const runSandboxStable = useCallback(async (id: string) => {
+    // re-read from state
+    setSandboxes(prev => {
+      const sandbox = prev.find(s => s.id === id);
+      if (!sandbox || sandbox.status === "running") return prev;
+
+      // fire and forget — update optimistically
+      (async () => {
+        updateSandbox(id, {
+          status: "running",
+          lines: ["$ Sending payload to runtime engine...", "⏳ Waiting for sandbox response..."],
+        });
+
+        try {
+          const resp = await fetch(`${API_BASE}/run`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              script: sandbox.script,
+              cpu_limit_secs: sandbox.cpuLimit,
+              mem_limit_mb: sandbox.ramLimit,
+            }),
+          });
+          const data = await resp.json();
+
+          if (resp.ok) {
+            const outputLines = data.logs
+              .split('\n')
+              .filter((l: string) => l.length > 0);
+            updateSandbox(id, {
+              status: data.status === "completed" ? "completed" : "failed",
+              lines: [
+                `$ sandbox run --cpu ${sandbox.cpuLimit}s --mem ${sandbox.ramLimit}MB`,
+                ...outputLines,
+                ``,
+                `Exit: ${data.status.toUpperCase()} in ${data.duration_ms}ms (run #${data.id})`,
+              ],
+              durationMs: data.duration_ms,
+              dbId: data.id,
+            });
+          } else {
+            updateSandbox(id, {
+              status: "failed",
+              lines: ["Error: " + (data.error || JSON.stringify(data))],
+            });
+          }
+        } catch (err: any) {
+          updateSandbox(id, {
+            status: "failed",
+            lines: ["❌ Network request failed. Is the backend running?", err?.message || ""],
+          });
+        }
+      })();
+      return prev;
+    });
+  }, [updateSandbox]);
 
   return (
     <main className="relative z-10 flex flex-col items-center">
@@ -196,16 +317,172 @@ function Home() {
       <HeroSection />
       <FeaturesSection />
       <HowItWorksSection />
-      <DeveloperExperience 
-        isRunning={isRunning} 
-        terminalLines={terminalLines} 
-        onRunDemo={runDemo} 
-      />
+      
+      {/* ─── Multi-Sandbox Execution Section ─── */}
+      <section id="demo" className="w-full max-w-7xl mx-auto px-6 py-32 z-10">
+        <div className="flex items-end justify-between mb-12">
+          <div>
+            <h2 className="text-3xl font-heading md:text-5xl font-bold text-slate-900 dark:text-white tracking-tight mb-4">Run Multiple Sandboxes.</h2>
+            <p className="text-slate-500 dark:text-slate-400 text-lg font-light leading-relaxed max-w-2xl">
+              Spin up multiple isolated execution environments concurrently. Each sandbox runs independently with its own resource limits, connected to the Hugging Face backend.
+            </p>
+          </div>
+          <button 
+            onClick={addSandbox}
+            className="flex-shrink-0 flex items-center gap-2 px-5 py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-semibold transition-all shadow-[0_0_30px_-5px_rgba(37,99,235,0.3)] group"
+          >
+            <Plus className="w-5 h-5 group-hover:rotate-90 transition-transform" /> New Sandbox
+          </button>
+        </div>
+
+        <div className="grid gap-6">
+          <AnimatePresence mode="popLayout">
+            {sandboxes.map((sb) => (
+              <motion.div
+                key={sb.id}
+                initial={{ opacity: 0, y: 20, scale: 0.97 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95, y: -10 }}
+                transition={{ duration: 0.3 }}
+              >
+                <SandboxPanel
+                  sandbox={sb}
+                  onRun={() => runSandboxStable(sb.id)}
+                  onRemove={() => removeSandbox(sb.id)}
+                  onUpdate={(patch) => updateSandbox(sb.id, patch)}
+                  canRemove={sandboxes.length > 1}
+                />
+              </motion.div>
+            ))}
+          </AnimatePresence>
+        </div>
+      </section>
+
       <PerformanceSecurity />
       <PricingSection />
     </main>
   );
 }
+
+// ─── Individual Sandbox Panel ───
+
+function SandboxPanel({ sandbox, onRun, onRemove, onUpdate, canRemove }: {
+  sandbox: SandboxInstance;
+  onRun: () => void;
+  onRemove: () => void;
+  onUpdate: (patch: Partial<SandboxInstance>) => void;
+  canRemove: boolean;
+}) {
+  const statusColor = {
+    idle: "border-slate-300 dark:border-white/10",
+    running: "border-blue-500/50 shadow-[0_0_30px_-10px_rgba(37,99,235,0.3)]",
+    completed: "border-emerald-500/50 shadow-[0_0_30px_-10px_rgba(16,185,129,0.2)]",
+    failed: "border-red-500/50 shadow-[0_0_30px_-10px_rgba(239,68,68,0.2)]",
+  }[sandbox.status];
+
+  const statusBadge = {
+    idle: { bg: "bg-slate-100 dark:bg-white/5 text-slate-500", label: "IDLE" },
+    running: { bg: "bg-blue-500/10 text-blue-500", label: "RUNNING" },
+    completed: { bg: "bg-emerald-500/10 text-emerald-500", label: "COMPLETED" },
+    failed: { bg: "bg-red-500/10 text-red-500", label: "FAILED" },
+  }[sandbox.status];
+
+  return (
+    <div className={`rounded-2xl border bg-white dark:bg-[#0a0a0a] transition-all duration-500 ${statusColor}`}>
+      {/* Header bar */}
+      <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 dark:border-white/5">
+        <div className="flex items-center gap-3">
+          <div className="w-2 h-2 rounded-full bg-current animate-pulse" style={{ color: sandbox.status === "running" ? "#3b82f6" : sandbox.status === "completed" ? "#10b981" : sandbox.status === "failed" ? "#ef4444" : "#94a3b8" }} />
+          <span className="text-sm font-mono text-slate-500 dark:text-slate-400">{sandbox.id}</span>
+          <span className={`text-[10px] font-bold tracking-wider px-2 py-0.5 rounded-full ${statusBadge.bg}`}>{statusBadge.label}</span>
+          {sandbox.durationMs !== undefined && (
+            <span className="text-xs text-slate-400 flex items-center gap-1"><Clock className="w-3 h-3" />{sandbox.durationMs}ms</span>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={onRun}
+            disabled={sandbox.status === "running"}
+            className="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:bg-blue-600/50 text-white text-xs font-bold rounded-lg transition-colors flex items-center gap-1.5"
+          >
+            {sandbox.status === "running" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Activity className="w-3 h-3" />}
+            {sandbox.status === "running" ? "Running..." : "Execute"}
+          </button>
+          {canRemove && (
+            <button onClick={onRemove} className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-500/10 rounded-lg transition-colors">
+              <X className="w-4 h-4" />
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="grid lg:grid-cols-2 divide-y lg:divide-y-0 lg:divide-x divide-slate-200 dark:divide-white/5">
+        {/* Left: Configuration */}
+        <div className="p-6 space-y-4">
+          <label className="block text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Script</label>
+          <textarea
+            value={sandbox.script}
+            onChange={e => onUpdate({ script: e.target.value })}
+            disabled={sandbox.status === "running"}
+            className="w-full bg-slate-50 dark:bg-[#111] border border-slate-200 dark:border-white/10 rounded-xl p-4 text-sm font-mono text-slate-800 dark:text-slate-200 h-28 focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none disabled:opacity-50"
+            placeholder="echo 'hello world'"
+          />
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1">CPU Limit (secs)</label>
+              <input
+                type="number"
+                value={sandbox.cpuLimit}
+                onChange={e => onUpdate({ cpuLimit: Number(e.target.value) })}
+                disabled={sandbox.status === "running"}
+                className="w-full bg-slate-50 dark:bg-[#111] border border-slate-200 dark:border-white/10 rounded-xl p-2.5 text-sm text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1">RAM Limit (MB)</label>
+              <input
+                type="number"
+                value={sandbox.ramLimit}
+                onChange={e => onUpdate({ ramLimit: Number(e.target.value) })}
+                disabled={sandbox.status === "running"}
+                className="w-full bg-slate-50 dark:bg-[#111] border border-slate-200 dark:border-white/10 rounded-xl p-2.5 text-sm text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* Right: Terminal output */}
+        <div className="relative">
+          <div className="flex items-center gap-2 px-5 py-3 border-b border-slate-200 dark:border-white/5 bg-slate-50/50 dark:bg-black/40">
+            <div className="w-2.5 h-2.5 rounded-full bg-red-500/60" />
+            <div className="w-2.5 h-2.5 rounded-full bg-yellow-500/60" />
+            <div className="w-2.5 h-2.5 rounded-full bg-green-500/60" />
+            <span className="ml-2 text-[10px] font-mono text-slate-400 tracking-wider uppercase">stdout · {sandbox.id}</span>
+          </div>
+          <div className="p-5 font-mono text-xs leading-6 text-slate-400 dark:text-slate-500 min-h-[200px] max-h-[300px] overflow-y-auto bg-slate-50 dark:bg-[#060606]">
+            {sandbox.lines.map((l, i) => (
+              <div key={i} className="flex gap-3">
+                <span className="select-none text-slate-300 dark:text-slate-700 w-5 text-right flex-shrink-0">{(i+1).toString().padStart(2, '0')}</span>
+                <span className={
+                  l.includes("Exit: COMPLETED") ? "text-emerald-400 font-bold" :
+                  l.includes("Exit: FAILED") ? "text-red-400 font-bold" :
+                  l.startsWith("$") ? "text-blue-400" :
+                  l.startsWith("❌") ? "text-red-400" :
+                  l.startsWith("⏳") ? "text-amber-400" :
+                  "text-slate-600 dark:text-slate-400"
+                }>{l}</span>
+              </div>
+            ))}
+            {sandbox.status === "running" && (
+              <motion.div animate={{ opacity: [1, 0] }} transition={{ repeat: Infinity, duration: 0.8 }} className="mt-1 w-2 h-3.5 bg-blue-400/60 inline-block ml-8" />
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 
 function HeroSection() {
   return (
@@ -362,55 +639,6 @@ function HowItWorksSection() {
             <p className="text-slate-500 dark:text-slate-400 text-sm font-light max-w-[250px]">{step.desc}</p>
           </div>
         ))}
-      </div>
-    </section>
-  );
-}
-
-function DeveloperExperience({ isRunning, terminalLines, onRunDemo }: { 
-  isRunning: boolean, 
-  terminalLines: string[], 
-  onRunDemo: () => void 
-}) {
-  return (
-    <section id="demo" className="w-full max-w-6xl mx-auto px-6 py-32 z-10">
-      <div className="grid lg:grid-cols-2 gap-16 items-center">
-        <div>
-          <h2 className="text-3xl font-heading md:text-5xl font-bold text-slate-900 dark:text-white tracking-tight mb-6 mt-16 lg:mt-0">Built for builders.</h2>
-          <p className="text-slate-500 dark:text-slate-400 text-lg font-light leading-relaxed mb-8">
-            Constructed with a developer-first methodology. A unified API plane to send execution payloads and stream logs back transparently. Watch it happen in real time seamlessly managed by Vercel Serverless.
-          </p>
-          <button 
-            onClick={onRunDemo}
-            disabled={isRunning}
-            className="px-6 py-3 bg-white dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-xl text-slate-900 dark:text-white font-medium hover:bg-slate-50 shadow-sm dark:hover:bg-white/10 transition-colors flex items-center gap-2 group disabled:opacity-50"
-          >
-            {isRunning ? "Running Sandbox..." : "Execute Test Demo"} <Activity className={`w-4 h-4 ${isRunning ? 'animate-pulse text-blue-500' : 'text-slate-500'}`} />
-          </button>
-        </div>
-
-        <div className="relative group">
-          <div className="absolute -inset-1 bg-gradient-to-r from-blue-600/30 to-purple-600/30 blur-2xl rounded-3xl opacity-50 group-hover:opacity-100 transition duration-1000" />
-          <div className="relative rounded-2xl bg-slate-900 dark:bg-[#0a0a0a] border border-slate-700 dark:border-white/10 overflow-hidden shadow-2xl">
-            <div className="flex items-center gap-2 px-4 py-3 border-b border-slate-800 dark:border-white/10 bg-black/60">
-              <div className="w-3 h-3 rounded-full bg-red-500/50" />
-              <div className="w-3 h-3 rounded-full bg-yellow-500/50" />
-              <div className="w-3 h-3 rounded-full bg-green-500/50" />
-              <span className="ml-2 text-xs font-mono text-slate-500 tracking-wider">tty1 - sandbox</span>
-            </div>
-            <div className="p-6 font-mono text-sm leading-8 text-slate-300 min-h-[300px]">
-              {terminalLines.map((l, i) => (
-                <div key={i} className="flex gap-4">
-                  <span className="select-none text-slate-600">{(i+1).toString().padStart(2, '0')}</span>
-                  <span className={l.includes("Exit") ? "text-emerald-400" : l.startsWith("$") ? "text-blue-300" : ""}>{l}</span>
-                </div>
-              ))}
-              {isRunning && (
-                <motion.div animate={{ opacity: [1, 0] }} transition={{ repeat: Infinity, duration: 0.8 }} className="mt-2 w-2 h-4 bg-white/50 inline-block ml-8" />
-              )}
-            </div>
-          </div>
-        </div>
       </div>
     </section>
   );
